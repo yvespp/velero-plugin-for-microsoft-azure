@@ -17,12 +17,15 @@ limitations under the License.
 package main
 
 import (
+	"fmt"
+
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/pflag"
 	veleroplugin "github.com/vmware-tanzu/velero/pkg/plugin/framework"
 )
 
 func main() {
+	fmt.Println("adsf")
 	veleroplugin.NewServer().
 		BindFlags(pflag.CommandLine).
 		RegisterObjectStore("velero.io/azure", newAzureObjectStore).
