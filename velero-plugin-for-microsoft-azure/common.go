@@ -31,6 +31,7 @@ const (
 
 	resourceGroupConfigKey   = "resourceGroup"
 	credentialsFileConfigKey = "credentialsFile"
+	subscriptionIDConfigKey  = "subscriptionId"
 )
 
 // credentialsFileFromEnv retrieves the Azure credentials file from the environment.

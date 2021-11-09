@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// TODO: still needed credentialsFileConfigKey?
+
 package main
 
 import (
@@ -23,6 +25,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	azidentity "github.com/Azure/azure-sdk-for-go/sdk/azidentity"
@@ -36,7 +39,6 @@ import (
 const (
 	storageAccountConfigKey          = "storageAccount"
 	storageAccountKeyEnvVarConfigKey = "storageAccountKeyEnvVar"
-	subscriptionIDConfigKey          = "subscriptionId"
 	blockSizeConfigKey               = "blockSizeInBytes"
 
 	// blocks must be less than/equal to 100MB in size
@@ -62,6 +64,7 @@ func (cg *azureContainerGetter) getContainer(bucket string) (container, error) {
 
 type container interface {
 	ListBlobs(params *azblob.ContainerListBlobFlatSegmentOptions) *azblob.ContainerListBlobFlatSegmentPager
+	ListBlobsHierarchy(delimiter string, listOptions *azblob.ContainerListBlobHierarchySegmentOptions) *azblob.ContainerListBlobHierarchySegmentPager
 }
 
 type azureContainer struct {
@@ -70,6 +73,10 @@ type azureContainer struct {
 
 func (c *azureContainer) ListBlobs(params *azblob.ContainerListBlobFlatSegmentOptions) *azblob.ContainerListBlobFlatSegmentPager {
 	return c.containerClient.ListBlobsFlat(params)
+}
+
+func (c *azureContainer) ListBlobsHierarchy(delimiter string, listOptions *azblob.ContainerListBlobHierarchySegmentOptions) *azblob.ContainerListBlobHierarchySegmentPager {
+	return c.containerClient.ListBlobsHierarchy(delimiter, listOptions)
 }
 
 type blobGetter interface {
@@ -84,6 +91,8 @@ func (bg *azureBlobGetter) getBlob(bucket, key string) (blob, error) {
 	containerClient := bg.serviceClient.NewContainerClient(bucket)
 	blobClient := containerClient.NewBlockBlobClient(key)
 	return &azureBlob{
+		container:  bucket,
+		blob:       key,
 		blobClient: &blobClient,
 	}, nil
 }
@@ -94,9 +103,12 @@ type blob interface {
 	Exists() (bool, error)
 	Get(options *azblob.DownloadBlobOptions) (*azblob.DownloadResponse, error)
 	Delete(options *azblob.DeleteBlobOptions) (azblob.BlobDeleteResponse, error)
+	GetSASURI(storageEndpointSuffix, storageAccount string, duration time.Duration) (string, error)
 }
 
 type azureBlob struct {
+	container  string
+	blob       string
 	blobClient *azblob.BlockBlobClient
 }
 
@@ -144,13 +156,34 @@ func (b *azureBlob) Delete(options *azblob.DeleteBlobOptions) (azblob.BlobDelete
 	return b.blobClient.Delete(context.TODO(), options)
 }
 
-// func (b *azureBlob) GetSASURI(options *storage.BlobSASOptions) (string, error) {
-// 	b.blobClient.GetSASToken()
-// 	return b.blob.GetSASURI(*options)
-// }
+func (b *azureBlob) GetSASURI(storageEndpointSuffix, storageAccount string, ttl time.Duration) (string, error) {
+	if true {
+		userDelegationKey, err := GetUserDelegationKey(storageEndpointSuffix, storageAccount)
+		if err != nil {
+			return "", err
+		}
+
+		fmt.Printf("%+v\n", userDelegationKey)
+		url, err := CreateSignedURL(storageEndpointSuffix, storageAccount, b.container, b.blob, userDelegationKey, ttl)
+		if err != nil {
+			return "", err
+		}
+		return url, nil
+	}
+
+	queryParam, err := b.blobClient.GetSASToken(azblob.BlobSASPermissions{Read: true}, time.Now(), time.Now().Add(ttl))
+	if err != nil {
+		return "", err
+	}
+	return queryParam.Encode(), nil
+
+}
 
 type ObjectStore struct {
-	log             logrus.FieldLogger
+	log                   logrus.FieldLogger
+	storageAccount        string
+	storageEndpointSuffix string
+
 	containerGetter containerGetter
 	blobGetter      blobGetter
 	blockSize       int
@@ -160,17 +193,7 @@ func newObjectStore(logger logrus.FieldLogger) *ObjectStore {
 	return &ObjectStore{log: logger}
 }
 
-// getSubscriptionID gets the subscription ID from the 'config' map if it contains
-// it, else from the AZURE_SUBSCRIPTION_ID environment variable.
-func getSubscriptionID(config map[string]string) string {
-	if subscriptionID := config[subscriptionIDConfigKey]; subscriptionID != "" {
-		return subscriptionID
-	}
-
-	return os.Getenv(subscriptionIDEnvVar)
-}
-
-func getServiceClient(config map[string]string) (*azblob.ServiceClient, error) {
+func getServiceClient(storageEndpointSuffix, storageAccount string, config map[string]string) (*azblob.ServiceClient, error) {
 	var credential azcore.Credential
 
 	credentialsFile, err := selectCredentialsFile(config)
@@ -182,13 +205,6 @@ func getServiceClient(config map[string]string) (*azblob.ServiceClient, error) {
 		return nil, err
 	}
 
-	// get Azure cloud from AZURE_CLOUD_NAME, if it exists. If the env var does not
-	// exist, parseAzureEnvironment will return azure.PublicCloud.
-	_, err = parseAzureEnvironment(os.Getenv(cloudNameEnvVar))
-	if err != nil {
-		return nil, errors.Wrap(err, "unable to parse azure cloud name environment variable")
-	}
-
 	// get storage account key from env var whose name is in config[storageAccountKeyEnvVarConfigKey].
 	// If the config does not exist, continue obtaining the storage key using API
 	if secretKeyEnvVar := config[storageAccountKeyEnvVarConfigKey]; secretKeyEnvVar != "" {
@@ -197,7 +213,7 @@ func getServiceClient(config map[string]string) (*azblob.ServiceClient, error) {
 			return nil, errors.Errorf("no storage account key found in env var %s", secretKeyEnvVar)
 		}
 
-		credential, err = azblob.NewSharedKeyCredential("accountName", storageKey)
+		credential, err = azblob.NewSharedKeyCredential(storageAccount, storageKey)
 		if err == nil {
 			return nil, err
 		}
@@ -213,12 +229,10 @@ func getServiceClient(config map[string]string) (*azblob.ServiceClient, error) {
 		}
 	}
 
-	serviceClient, err := azblob.NewServiceClient("https://<myAccountName>.blob.core.windows.net/", credential, nil)
+	serviceClient, err := azblob.NewServiceClient(fmt.Sprintf("https://%s.%s", storageAccount, storageEndpointSuffix), credential, nil)
 	if err != nil {
 		return nil, err
 	}
-	//containerClient := serviceClient.NewContainerClient("velero")
-	//blobClient := containerClient.NewBlobClient("velero")
 
 	return &serviceClient, nil
 
@@ -232,23 +246,29 @@ func mapLookup(data map[string]string) func(string) string {
 
 func (o *ObjectStore) Init(config map[string]string) error {
 	if err := veleroplugin.ValidateObjectStoreConfigKeys(config,
-		resourceGroupConfigKey,
 		storageAccountConfigKey,
-		subscriptionIDConfigKey,
 		blockSizeConfigKey,
 		storageAccountKeyEnvVarConfigKey,
-		credentialsFileConfigKey,
 	); err != nil {
 		return err
 	}
 
-	serviceClient, err := getServiceClient(config)
+	if config[storageAccountConfigKey] == "" {
+		return errors.Errorf("%s not defined", storageAccountConfigKey)
+	}
+	o.storageAccount = config[storageAccountConfigKey]
+
+	// get Azure cloud from AZURE_CLOUD_NAME, if it exists. If the env var does not
+	// exist, parseAzureEnvironment will return azure.PublicCloud.
+	env, err := parseAzureEnvironment(os.Getenv(cloudNameEnvVar))
+	if err != nil {
+		return errors.Wrap(err, "unable to parse azure cloud name environment variable")
+	}
+	o.storageEndpointSuffix = env.StorageEndpointSuffix
+
+	serviceClient, err := getServiceClient(o.storageEndpointSuffix, o.storageAccount, config)
 	if err != nil {
 		return err
-	}
-
-	if _, err := getRequiredValues(mapLookup(config), storageAccountConfigKey); err != nil {
-		return errors.Wrap(err, "unable to get all required config values")
 	}
 
 	o.containerGetter = &azureContainerGetter{
@@ -362,30 +382,28 @@ func (o *ObjectStore) GetObject(bucket, key string) (io.ReadCloser, error) {
 }
 
 func (o *ObjectStore) ListCommonPrefixes(bucket, prefix, delimiter string) ([]string, error) {
-	// container, err := o.containerGetter.getContainer(bucket)
-	// if err != nil {
-	// 	return nil, err
-	// }
+	container, err := o.containerGetter.getContainer(bucket)
+	if err != nil {
+		return nil, err
+	}
 
-	// params := azblob.ContainerListBlobFlatSegmentOptions{
-	// 	Prefix: &prefix,
-	// 			Delimiter: delimiter,
-	// }
+	params := azblob.ContainerListBlobHierarchySegmentOptions{
+		Prefix: &prefix,
+	}
 
-	// var prefixes []string
-	// for {
-	// 	res := container.ListBlobs(&params)
-	// 	if err != nil {
-	// 		return nil, errors.WithStack(err)
-	// 	}
-	// 	prefixes = append(prefixes, res.BlobPrefixes...)
-	// 	if res.NextMarker == "" {
-	// 		break
-	// 	}
-	// 	params.Marker = res.NextMarker
-	// }
+	var prefixes []string
+	res := container.ListBlobsHierarchy(delimiter, &params)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	for {
+		prefixes = append(prefixes, *res.PageResponse().Prefix)
+		if !res.NextPage(context.TODO()) {
+			break
+		}
+	}
 
-	return nil, nil
+	return prefixes, nil
 }
 
 func (o *ObjectStore) ListObjects(bucket, prefix string) ([]string, error) {
@@ -423,4 +441,13 @@ func (o *ObjectStore) DeleteObject(bucket string, key string) error {
 
 	_, err = blob.Delete(nil)
 	return errors.WithStack(err)
+}
+
+func (o *ObjectStore) CreateSignedURL(bucket, key string, ttl time.Duration) (string, error) {
+	blob, err := o.blobGetter.getBlob(bucket, key)
+	if err != nil {
+		return "", err
+	}
+
+	return blob.GetSASURI(o.storageEndpointSuffix, o.storageAccount, ttl)
 }
