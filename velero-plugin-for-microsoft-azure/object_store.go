@@ -158,13 +158,15 @@ func (b *azureBlob) Delete(options *azblob.DeleteBlobOptions) (azblob.BlobDelete
 
 func (b *azureBlob) GetSASURI(storageEndpointSuffix, storageAccount string, ttl time.Duration, useDelegationSAS bool) (string, error) {
 	if useDelegationSAS {
-		userDelegationKey, err := GetUserDelegationKey(storageEndpointSuffix, storageAccount)
+		start := time.Now().Add(-1 * time.Minute)
+		expiry := time.Now().Add(ttl)
+		userDelegationKey, err := GetUserDelegationKey(storageEndpointSuffix, storageAccount, start, expiry)
 		if err != nil {
 			return "", err
 		}
 
 		fmt.Printf("%+v\n", userDelegationKey)
-		url, err := CreateSignedURL(storageEndpointSuffix, storageAccount, b.container, b.blob, userDelegationKey, ttl)
+		url, err := CreateSignedURL(storageEndpointSuffix, storageAccount, b.container, b.blob, userDelegationKey, start, expiry)
 		if err != nil {
 			return "", err
 		}

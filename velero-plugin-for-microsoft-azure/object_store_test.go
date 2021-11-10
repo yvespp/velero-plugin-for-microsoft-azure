@@ -17,10 +17,10 @@ limitations under the License.
 package main
 
 import (
-	"io"
 	"testing"
+	"time"
 
-	"github.com/Azure/azure-sdk-for-go/storage"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -108,13 +108,13 @@ type mockBlob struct {
 	mock.Mock
 }
 
-func (m *mockBlob) PutBlock(blockID string, chunk []byte, options *storage.PutBlockOptions) error {
+func (m *mockBlob) PutBlock(blockID string, chunk []byte, options *azblob.StageBlockOptions) (azblob.BlockBlobStageBlockResponse, error) {
 	args := m.Called(blockID, chunk, options)
-	return args.Error(0)
+	return args.Get(0).(azblob.BlockBlobStageBlockResponse), args.Error(1)
 }
-func (m *mockBlob) PutBlockList(blocks []storage.Block, options *storage.PutBlockListOptions) error {
+func (m *mockBlob) PutBlockList(blocks []string, options *azblob.CommitBlockListOptions) (azblob.BlockBlobCommitBlockListResponse, error) {
 	args := m.Called(blocks, options)
-	return args.Error(0)
+	return args.Get(0).(azblob.BlockBlobCommitBlockListResponse), args.Error(1)
 }
 
 func (m *mockBlob) Exists() (bool, error) {
@@ -122,18 +122,18 @@ func (m *mockBlob) Exists() (bool, error) {
 	return args.Bool(0), args.Error(1)
 }
 
-func (m *mockBlob) Get(options *storage.GetBlobOptions) (io.ReadCloser, error) {
+func (m *mockBlob) Get(options *azblob.DownloadBlobOptions) (*azblob.DownloadResponse, error) {
 	args := m.Called(options)
-	return args.Get(0).(io.ReadCloser), args.Error(1)
+	return args.Get(0).(*azblob.DownloadResponse), args.Error(1)
 }
 
-func (m *mockBlob) Delete(options *storage.DeleteBlobOptions) error {
+func (m *mockBlob) Delete(options *azblob.DeleteBlobOptions) (azblob.BlobDeleteResponse, error) {
 	args := m.Called(options)
-	return args.Error(0)
+	return args.Get(0).(azblob.BlobDeleteResponse), args.Error(1)
 }
 
-func (m *mockBlob) GetSASURI(options *storage.BlobSASOptions) (string, error) {
-	args := m.Called(options)
+func (m *mockBlob) GetSASURI(storageEndpointSuffix, storageAccount string, ttl time.Duration, useDelegationSAS bool) (string, error) {
+	args := m.Called(storageEndpointSuffix, storageAccount, ttl, useDelegationSAS)
 	return args.String(0), args.Error(1)
 }
 
@@ -150,7 +150,12 @@ type mockContainer struct {
 	mock.Mock
 }
 
-func (m *mockContainer) ListBlobs(params storage.ListBlobsParameters) (storage.BlobListResponse, error) {
+func (m *mockContainer) ListBlobs(params *azblob.ContainerListBlobFlatSegmentOptions) *azblob.ContainerListBlobFlatSegmentPager {
 	args := m.Called(params)
-	return args.Get(0).(storage.BlobListResponse), args.Error(1)
+	return args.Get(0).(*azblob.ContainerListBlobFlatSegmentPager)
+}
+
+func (m *mockContainer) ListBlobsHierarchy(delimiter string, listOptions *azblob.ContainerListBlobHierarchySegmentOptions) *azblob.ContainerListBlobHierarchySegmentPager {
+	args := m.Called(delimiter, listOptions)
+	return args.Get(0).(*azblob.ContainerListBlobHierarchySegmentPager)
 }
