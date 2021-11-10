@@ -103,7 +103,7 @@ type blob interface {
 	Exists() (bool, error)
 	Get(options *azblob.DownloadBlobOptions) (*azblob.DownloadResponse, error)
 	Delete(options *azblob.DeleteBlobOptions) (azblob.BlobDeleteResponse, error)
-	GetSASURI(storageEndpointSuffix, storageAccount string, duration time.Duration) (string, error)
+	GetSASURI(storageEndpointSuffix, storageAccount string, duration time.Duration, useDelegationSAS bool) (string, error)
 }
 
 type azureBlob struct {
@@ -156,8 +156,8 @@ func (b *azureBlob) Delete(options *azblob.DeleteBlobOptions) (azblob.BlobDelete
 	return b.blobClient.Delete(context.TODO(), options)
 }
 
-func (b *azureBlob) GetSASURI(storageEndpointSuffix, storageAccount string, ttl time.Duration) (string, error) {
-	if true {
+func (b *azureBlob) GetSASURI(storageEndpointSuffix, storageAccount string, ttl time.Duration, useDelegationSAS bool) (string, error) {
+	if useDelegationSAS {
 		userDelegationKey, err := GetUserDelegationKey(storageEndpointSuffix, storageAccount)
 		if err != nil {
 			return "", err
@@ -180,62 +180,56 @@ func (b *azureBlob) GetSASURI(storageEndpointSuffix, storageAccount string, ttl 
 }
 
 type ObjectStore struct {
-	log                   logrus.FieldLogger
+	log logrus.FieldLogger
+
+	containerGetter       containerGetter
+	blobGetter            blobGetter
+	blockSize             int
 	storageAccount        string
 	storageEndpointSuffix string
-
-	containerGetter containerGetter
-	blobGetter      blobGetter
-	blockSize       int
+	useDelegationSAS      bool
 }
 
 func newObjectStore(logger logrus.FieldLogger) *ObjectStore {
 	return &ObjectStore{log: logger}
 }
 
-func getServiceClient(storageEndpointSuffix, storageAccount string, config map[string]string) (*azblob.ServiceClient, error) {
-	var credential azcore.Credential
-
+// get storage account key from env var whose name is in config[storageAccountKeyEnvVarConfigKey].
+func getStorageKey(config map[string]string) (string, error) {
 	credentialsFile, err := selectCredentialsFile(config)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-
 	if err := loadCredentialsIntoEnv(credentialsFile); err != nil {
-		return nil, err
+		return "", err
+	}
+	secretKeyEnvVar := config[storageAccountKeyEnvVarConfigKey]
+	if secretKeyEnvVar != "" {
+		return os.Getenv(secretKeyEnvVar), nil
 	}
 
-	// get storage account key from env var whose name is in config[storageAccountKeyEnvVarConfigKey].
-	// If the config does not exist, continue obtaining the storage key using API
-	if secretKeyEnvVar := config[storageAccountKeyEnvVarConfigKey]; secretKeyEnvVar != "" {
-		storageKey := os.Getenv(secretKeyEnvVar)
-		if storageKey == "" {
-			return nil, errors.Errorf("no storage account key found in env var %s", secretKeyEnvVar)
-		}
+	return "", nil
+}
 
-		credential, err = azblob.NewSharedKeyCredential(storageAccount, storageKey)
+// getCredential from the optional storage account key or via the env
+func getCredential(storageAccount, storageKey string) (azcore.Credential, error) {
+	if storageKey != "" {
+		credential, err := azblob.NewSharedKeyCredential(storageAccount, storageKey)
 		if err == nil {
 			return nil, err
 		}
-	} else {
-		// get authorizer from environment in the following order:
-		// 1. client credentials (AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET)
-		// 2. client certificate (AZURE_CERTIFICATE_PATH, AZURE_CERTIFICATE_PASSWORD)
-		// 3. username and password (AZURE_USERNAME, AZURE_PASSWORD)
-		// 4. MSI (managed service identity)
-		credential, err = azidentity.NewDefaultAzureCredential(nil)
-		if err != nil {
-			return nil, errors.Wrap(err, "error getting authorizer from environment")
-		}
+		return credential, nil
 	}
-
-	serviceClient, err := azblob.NewServiceClient(fmt.Sprintf("https://%s.%s", storageAccount, storageEndpointSuffix), credential, nil)
+	// get authorizer from environment in the following order:
+	// 1. client credentials (AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET)
+	// 2. client certificate (AZURE_CERTIFICATE_PATH, AZURE_CERTIFICATE_PASSWORD)
+	// 3. username and password (AZURE_USERNAME, AZURE_PASSWORD)
+	// 4. MSI (managed service identity)
+	credential, err := azidentity.NewDefaultAzureCredential(nil)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "error getting authorizer from environment")
 	}
-
-	return &serviceClient, nil
-
+	return credential, err
 }
 
 func mapLookup(data map[string]string) func(string) string {
@@ -266,16 +260,26 @@ func (o *ObjectStore) Init(config map[string]string) error {
 	}
 	o.storageEndpointSuffix = env.StorageEndpointSuffix
 
-	serviceClient, err := getServiceClient(o.storageEndpointSuffix, o.storageAccount, config)
+	// optional
+	storageKey, _ := getStorageKey(config)
+	if storageKey == "" {
+		o.useDelegationSAS = true
+	}
+
+	credential, err := getCredential(o.storageAccount, storageKey)
+	if err != nil {
+		return err
+	}
+	serviceClient, err := azblob.NewServiceClient(fmt.Sprintf("https://%s.%s", o.storageAccount, o.storageEndpointSuffix), credential, nil)
 	if err != nil {
 		return err
 	}
 
 	o.containerGetter = &azureContainerGetter{
-		serviceClient: serviceClient,
+		serviceClient: &serviceClient,
 	}
 	o.blobGetter = &azureBlobGetter{
-		serviceClient: serviceClient,
+		serviceClient: &serviceClient,
 	}
 
 	o.blockSize = getBlockSize(o.log, config)
@@ -449,5 +453,5 @@ func (o *ObjectStore) CreateSignedURL(bucket, key string, ttl time.Duration) (st
 		return "", err
 	}
 
-	return blob.GetSASURI(o.storageEndpointSuffix, o.storageAccount, ttl)
+	return blob.GetSASURI(o.storageEndpointSuffix, o.storageAccount, ttl, o.useDelegationSAS)
 }

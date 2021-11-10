@@ -4,8 +4,8 @@ go 1.13
 
 require (
 	github.com/Azure/azure-sdk-for-go v42.0.0+incompatible
-	github.com/Azure/azure-sdk-for-go/sdk/azcore v0.19.0 // indirect
-	github.com/Azure/azure-sdk-for-go/sdk/azidentity v0.11.0 // indirect
+	github.com/Azure/azure-sdk-for-go/sdk/azcore v0.19.0
+	github.com/Azure/azure-sdk-for-go/sdk/azidentity v0.11.0
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v0.1.0
 	github.com/Azure/go-autorest/autorest v0.9.6
 	github.com/Azure/go-autorest/autorest/azure/auth v0.4.2
